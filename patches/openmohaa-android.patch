@@ -1,0 +1,1138 @@
+diff --git a/cmake/client.cmake b/cmake/client.cmake
+index 7560473..99c72a1 100644
+--- a/cmake/client.cmake
++++ b/cmake/client.cmake
+@@ -57,6 +57,7 @@ set(CLIENT_SOURCES
+     ${SOURCE_DIR}/client/usignal.cpp
+     ${SOURCE_DIR}/sdl/sdl_input.c
+     ${SOURCE_DIR}/sdl/sdl_mouse.c
++    ${SOURCE_DIR}/sdl/sdl_touch.c
+     ${CLIENT_PLATFORM_SOURCES}
+ )
+ 
+@@ -106,7 +107,13 @@ list(APPEND CLIENT_BINARY_SOURCES
+     ${ASM_SOURCES}
+     ${CLIENT_LIBRARY_SOURCES})
+ 
+-add_executable(${CLIENT_BINARY} ${CLIENT_EXECUTABLE_OPTIONS} ${CLIENT_BINARY_SOURCES})
++if(ANDROID)
++    # SDL's Java activity loads the game from libmain.so and calls SDL_main()
++    add_library(${CLIENT_BINARY} SHARED ${CLIENT_BINARY_SOURCES})
++    set_target_properties(${CLIENT_BINARY} PROPERTIES OUTPUT_NAME main)
++else()
++    add_executable(${CLIENT_BINARY} ${CLIENT_EXECUTABLE_OPTIONS} ${CLIENT_BINARY_SOURCES})
++endif()
+ 
+ target_include_directories(     ${CLIENT_BINARY} PRIVATE ${CLIENT_INCLUDE_DIRS})
+ target_include_directories(     ${CLIENT_BINARY} PRIVATE ${SOURCE_DIR}/client)
+diff --git a/cmake/platforms/all.cmake b/cmake/platforms/all.cmake
+index f7fc374..865c2c2 100644
+--- a/cmake/platforms/all.cmake
++++ b/cmake/platforms/all.cmake
+@@ -1,3 +1,4 @@
++include(platforms/android)
+ include(platforms/emscripten)
+ include(platforms/linux)
+ include(platforms/macos)
+diff --git a/cmake/platforms/android.cmake b/cmake/platforms/android.cmake
+new file mode 100644
+index 0000000..209fdec
+--- /dev/null
++++ b/cmake/platforms/android.cmake
+@@ -0,0 +1,36 @@
++# Android specific settings
++#
++# The Android build is driven by android/build_native.sh which builds the
++# dependencies (SDL2, OpenAL Soft, gl4es) first and passes their locations:
++#   SDL2_DIR           - SDL2 CMake config directory
++#   OPENAL_INCLUDE_DIR - OpenAL Soft include directory (containing AL/)
++#   OPENAL_LIBRARY     - libopenal.so
++#   GL4ES_INCLUDE_DIR  - gl4es include directory
++#   GL4ES_LIBRARY      - libGL.a (static gl4es)
++
++if(NOT ANDROID)
++    return()
++endif()
++
++# Android only packages native libraries named lib*.so
++set(CMAKE_SHARED_LIBRARY_PREFIX "lib")
++
++# Disable options that don't make sense on Android
++set(BUILD_SERVER OFF CACHE INTERNAL "")
++set(BUILD_GAME_QVMS OFF CACHE INTERNAL "")
++set(USE_HTTP OFF CACHE INTERNAL "")
++set(USE_OPENAL_DLOPEN OFF CACHE INTERNAL "")
++set(USE_INTERNAL_SDL OFF CACHE INTERNAL "")
++
++# Both renderers are built as loadable modules:
++#  - opengl1: the classic renderer, running on OpenGL ES 2 through gl4es (default)
++#  - opengl2: native OpenGL ES renderer (experimental)
++set(BUILD_RENDERER_GL1 ON CACHE INTERNAL "")
++set(BUILD_RENDERER_GL2 ON CACHE INTERNAL "")
++set(USE_RENDERER_DLOPEN ON CACHE INTERNAL "")
++
++# No LTO, it makes debugging crashes from logcat much harder
++set(CMAKE_INTERPROCEDURAL_OPTIMIZATION FALSE)
++
++list(APPEND CLIENT_LIBRARIES log android)
++list(APPEND COMMON_LIBRARIES log)
+diff --git a/cmake/renderer_gl1.cmake b/cmake/renderer_gl1.cmake
+index a39652f..1459601 100644
+--- a/cmake/renderer_gl1.cmake
++++ b/cmake/renderer_gl1.cmake
+@@ -62,6 +62,13 @@ if(USE_RENDERER_DLOPEN)
+ 
+     set_output_dirs(${RENDERER_GL1_BINARY})
+ 
++    if(ANDROID)
++        # Fixed-function OpenGL on top of OpenGL ES 2 through gl4es
++        target_compile_definitions( ${RENDERER_GL1_BINARY} PRIVATE USE_GL4ES)
++        target_include_directories( ${RENDERER_GL1_BINARY} PRIVATE ${GL4ES_INCLUDE_DIR})
++        target_link_libraries(      ${RENDERER_GL1_BINARY} PRIVATE ${GL4ES_LIBRARY} dl log)
++    endif()
++
+ 	INSTALL(TARGETS ${RENDERER_GL1_BINARY} DESTINATION ${INSTALL_LIBDIR_FULL})
+ 
+ 	if(MSVC)
+diff --git a/code/client/cl_input.cpp b/code/client/cl_input.cpp
+index 7246dfa..10f1f11 100644
+--- a/code/client/cl_input.cpp
++++ b/code/client/cl_input.cpp
+@@ -745,6 +745,9 @@ usercmd_t CL_CreateCmd( void ) {
+ 	// get basic movement from joystick
+ 	CL_JoystickMove( &cmd );
+ 
++	// on-screen touch controls
++	IN_Touch_Move( &cmd );
++
+ 	// check to make sure the angles haven't wrapped
+ 	if ( cl.viewangles[PITCH] - oldAngles[PITCH] > 90 ) {
+ 		cl.viewangles[PITCH] = oldAngles[PITCH] + 90;
+diff --git a/code/client/cl_scrn.cpp b/code/client/cl_scrn.cpp
+index a14769a..a37a882 100644
+--- a/code/client/cl_scrn.cpp
++++ b/code/client/cl_scrn.cpp
+@@ -486,6 +486,11 @@ void UpdateStereoSide( stereoFrame_t s ) {
+ 		SCR_DrawCinematic();
+ 	}
+ 	UI_Update();
++
++	// on-screen touch controls are drawn on top of everything
++	if( s != STEREO_RIGHT ) {
++		IN_Touch_Draw();
++	}
+ }
+ 
+ /*
+diff --git a/code/client/client.h b/code/client/client.h
+index 798d634..10c2ebb 100644
+--- a/code/client/client.h
++++ b/code/client/client.h
+@@ -769,6 +769,16 @@ qboolean CL_VideoRecording( void );
+ //
+ void CL_InitConsoleCommands( void );
+ 
++//
++// sdl_touch.c (on-screen touch controls)
++//
++void     IN_Touch_Init( void );
++qboolean IN_Touch_Enabled( void );
++qboolean IN_Touch_BlockMouse( void );
++qboolean IN_Touch_HandleEvent( const void *sdlEvent );
++void     IN_Touch_Move( usercmd_t *cmd );
++void     IN_Touch_Draw( void );
++
+ #ifdef __cplusplus
+ }
+ #endif
+diff --git a/code/gamespy/common/linux/gsThreadLinux.c b/code/gamespy/common/linux/gsThreadLinux.c
+index a061816..021d1f6 100644
+--- a/code/gamespy/common/linux/gsThreadLinux.c
++++ b/code/gamespy/common/linux/gsThreadLinux.c
+@@ -54,7 +54,12 @@ void gsiCancelThread(GSIThreadID id)
+ 	//should i destroy the attributes here?
+ 	pthread_attr_destroy(&id.attr);
+ 
++#ifdef __ANDROID__
++	// bionic has no pthread_cancel(), the thread is left to finish on its own
++	if (0) {
++#else
+ 	if (pthread_cancel(id.thread) != PTHREAD_NO_ERROR) {
++#endif
+ 		//there was an error - how should we handle these? or should we?
+ 		gsDebugFormat(GSIDebugCat_Common, GSIDebugType_Misc, GSIDebugLevel_WarmError,
+ 			"Failed to cancel thread\r\n");
+diff --git a/code/sdl/sdl_glimp.c b/code/sdl/sdl_glimp.c
+index 2ac8b9e..6b71be9 100644
+--- a/code/sdl/sdl_glimp.c
++++ b/code/sdl/sdl_glimp.c
+@@ -35,6 +35,25 @@ Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA  02110-1301  USA
+ #include "../sys/sys_local.h"
+ #include "sdl_icon.h"
+ 
++extern SDL_Window *SDL_window;
++
++#ifdef USE_GL4ES
++// Android: the fixed-function (GL1) renderer runs on top of OpenGL ES 2
++// through the gl4es translation layer. SDL creates the GLES context,
++// gl4es provides the desktop GL entry points.
++#include "gl4esinit.h"
++void gl4es_pre_swap( void );
++#define GLIMP_GETPROC( name ) gl4es_GetProcAddress( name )
++
++static qboolean gl4es_initialized = qfalse;
++
++static void APIENTRY GLimp_GL4ES_GetMainFBSize( int *width, int *height ) {
++	SDL_GL_GetDrawableSize( SDL_window, width, height );
++}
++#else
++#define GLIMP_GETPROC( name ) SDL_GL_GetProcAddress( name )
++#endif
++
+ typedef enum
+ {
+ 	RSERR_OK,
+@@ -266,7 +285,7 @@ static qboolean GLimp_GetProcAddresses( qboolean fixedFunction ) {
+ #ifdef __SDL_NOGETPROCADDR__
+ #define GLE( ret, name, ... ) qgl##name = gl#name;
+ #else
+-#define GLE( ret, name, ... ) qgl##name = (name##proc *) SDL_GL_GetProcAddress("gl" #name); \
++#define GLE( ret, name, ... ) qgl##name = (name##proc *) GLIMP_GETPROC("gl" #name); \
+ 	if ( qgl##name == NULL ) { \
+ 		ri.Printf( PRINT_ALL, "ERROR: Missing OpenGL function %s\n", "gl" #name ); \
+ 		success = qfalse; \
+@@ -587,10 +606,18 @@ static int GLimp_SetMode(int mode, qboolean fullscreen, qboolean noborder, qbool
+ 			numContexts++;
+ 		}
+ 	} else {
++#ifdef USE_GL4ES
++		// gl4es needs an OpenGL ES 2.0 context
++		contexts[numContexts].profileMask = SDL_GL_CONTEXT_PROFILE_ES;
++		contexts[numContexts].majorVersion = 2;
++		contexts[numContexts].minorVersion = 0;
++		numContexts++;
++#else
+ 		contexts[numContexts].profileMask = 0;
+ 		contexts[numContexts].majorVersion = 1;
+ 		contexts[numContexts].minorVersion = 1;
+ 		numContexts++;
++#endif
+ 	}
+ 
+ 	for (i = 0; i < 16; i++)
+@@ -732,6 +759,15 @@ static int GLimp_SetMode(int mode, qboolean fullscreen, qboolean noborder, qbool
+ 				continue;
+ 			}
+ 
++#ifdef USE_GL4ES
++			if ( !gl4es_initialized ) {
++				set_getprocaddress( (void *(*)(const char *))SDL_GL_GetProcAddress );
++				set_getmainfbsize( GLimp_GL4ES_GetMainFBSize );
++				initialize_gl4es();
++				gl4es_initialized = qtrue;
++			}
++#endif
++
+ 			if ( !GLimp_GetProcAddresses( fixedFunction ) )
+ 			{
+ 				ri.Printf( PRINT_ALL, "GLimp_GetProcAddresses() for %s context failed\n", contextName );
+@@ -977,9 +1013,9 @@ static void GLimp_InitExtensions( qboolean fixedFunction )
+ 		{
+ 			if ( r_ext_multitexture->value )
+ 			{
+-				qglMultiTexCoord2fARB = SDL_GL_GetProcAddress( "glMultiTexCoord2fARB" );
+-				qglActiveTextureARB = SDL_GL_GetProcAddress( "glActiveTextureARB" );
+-				qglClientActiveTextureARB = SDL_GL_GetProcAddress( "glClientActiveTextureARB" );
++				qglMultiTexCoord2fARB = GLIMP_GETPROC( "glMultiTexCoord2fARB" );
++				qglActiveTextureARB = GLIMP_GETPROC( "glActiveTextureARB" );
++				qglClientActiveTextureARB = GLIMP_GETPROC( "glClientActiveTextureARB" );
+ 
+ 				if ( qglActiveTextureARB )
+ 				{
+@@ -1015,8 +1051,8 @@ static void GLimp_InitExtensions( qboolean fixedFunction )
+ 			if ( r_ext_compiled_vertex_array->value )
+ 			{
+ 				ri.Printf( PRINT_ALL, "...using GL_EXT_compiled_vertex_array\n" );
+-				qglLockArraysEXT = ( void ( APIENTRY * )( GLint, GLint ) ) SDL_GL_GetProcAddress( "glLockArraysEXT" );
+-				qglUnlockArraysEXT = ( void ( APIENTRY * )( void ) ) SDL_GL_GetProcAddress( "glUnlockArraysEXT" );
++				qglLockArraysEXT = ( void ( APIENTRY * )( GLint, GLint ) ) GLIMP_GETPROC( "glLockArraysEXT" );
++				qglUnlockArraysEXT = ( void ( APIENTRY * )( void ) ) GLIMP_GETPROC( "glUnlockArraysEXT" );
+ 				if (!qglLockArraysEXT || !qglUnlockArraysEXT)
+ 				{
+ 					ri.Error (ERR_FATAL, "bad getprocaddress");
+@@ -1192,6 +1228,9 @@ void GLimp_EndFrame( void )
+ 	// don't flip if drawing to front buffer
+ 	if ( Q_stricmp( r_drawBuffer->string, "GL_FRONT" ) != 0 )
+ 	{
++#ifdef USE_GL4ES
++		gl4es_pre_swap();
++#endif
+ 		SDL_GL_SwapWindow( SDL_window );
+ 	}
+ 
+diff --git a/code/sdl/sdl_input.c b/code/sdl/sdl_input.c
+index 74761af..2e4e5a3 100644
+--- a/code/sdl/sdl_input.c
++++ b/code/sdl/sdl_input.c
+@@ -240,6 +240,7 @@ static keyNum_t IN_TranslateSDLToQ3Key( SDL_Keysym *keysym, qboolean down )
+ 			case SDLK_KP_8:         key = K_KP_UPARROW;    break;
+ 			case SDLK_UP:           key = K_UPARROW;       break;
+ 			case SDLK_ESCAPE:       key = K_ESCAPE;        break;
++			case SDLK_AC_BACK:      key = K_ESCAPE;        break; // Android back button
+ 			case SDLK_KP_ENTER:     key = K_KP_ENTER;      break;
+ 			case SDLK_RETURN:       key = K_ENTER;         break;
+ 			case SDLK_TAB:          key = K_TAB;           break;
+@@ -356,6 +357,14 @@ static void IN_ActivateMouse( qboolean isFullscreen )
+ 	if (!mouseAvailable || !SDL_WasInit( SDL_INIT_VIDEO ) )
+ 		return;
+ 
++	if( IN_Touch_Enabled() )
++	{
++		// Touch screen: the mouse is emulated from touches by SDL and used
++		// as an absolute cursor in menus, never grab it in relative mode
++		mouseActive = qtrue;
++		return;
++	}
++
+ 	if( !mouseActive )
+ 	{
+ 		SDL_SetRelativeMouseMode( SDL_TRUE );
+@@ -1120,7 +1129,15 @@ static void IN_ProcessEvents( void )
+         }
+ 				break;
+ 
++			case SDL_FINGERDOWN:
++			case SDL_FINGERUP:
++			case SDL_FINGERMOTION:
++				IN_Touch_HandleEvent( &e );
++				break;
++
+ 			case SDL_MOUSEMOTION:
++				if( e.motion.which == SDL_TOUCH_MOUSEID && IN_Touch_BlockMouse() )
++					break; // touches are handled by the on-screen controls in game
+ 				if( mouseActive )
+ 				{
+ 					if( !e.motion.xrel && !e.motion.yrel )
+@@ -1131,6 +1148,8 @@ static void IN_ProcessEvents( void )
+ 
+ 			case SDL_MOUSEBUTTONDOWN:
+ 			case SDL_MOUSEBUTTONUP:
++				if( e.button.which == SDL_TOUCH_MOUSEID && IN_Touch_BlockMouse() )
++					break; // touches are handled by the on-screen controls in game
+ 				{
+ 					int b;
+ 					switch( e.button.button )
+@@ -1313,13 +1332,21 @@ void IN_Init( void *windowData )
+ 	in_nograb = Cvar_Get( "in_nograb", "0", CVAR_ARCHIVE );
+ 
+ 	in_joystick = Cvar_Get( "in_joystick", "0", CVAR_ARCHIVE|CVAR_LATCH );
++
++	IN_Touch_Init( );
+ 	in_joystickThreshold = Cvar_Get( "joy_threshold", "0.15", CVAR_ARCHIVE );
+ 
+ #if defined(PROTOCOL_HANDLER) && defined(__APPLE__)
+ 	SDL_EventState( SDL_DROPFILE, SDL_ENABLE );
+ #endif
+ 
++#ifdef __ANDROID__
++	// Don't pop up the on-screen keyboard on start, the touch controls
++	// have a button to show it when needed
++	SDL_StopTextInput( );
++#else
+ 	SDL_StartTextInput( );
++#endif
+ 
+ 	mouseAvailable = ( in_mouse->value != 0 );
+ 	IN_DeactivateMouse( Cvar_VariableIntegerValue( "r_fullscreen" ) != 0 );
+diff --git a/code/sdl/sdl_touch.c b/code/sdl/sdl_touch.c
+new file mode 100644
+index 0000000..18ece14
+--- /dev/null
++++ b/code/sdl/sdl_touch.c
+@@ -0,0 +1,654 @@
++/*
++===========================================================================
++Touch screen controls for OpenMoHAA (Android port)
++
++This file is part of OpenMoHAA source code.
++
++OpenMoHAA source code is free software; you can redistribute it
++and/or modify it under the terms of the GNU General Public License as
++published by the Free Software Foundation; either version 2 of the License,
++or (at your option) any later version.
++===========================================================================
++
++Virtual on-screen controls drawn on top of the game:
++  - left half of the screen: floating movement stick
++  - right half of the screen: swipe to look around
++  - buttons: fire, alt fire, jump, crouch (toggle), reload, use,
++    lean left/right, next/prev weapon, scores, menu (escape),
++    keyboard toggle, console
++
++Controls are only active while actually playing (no menu / console open).
++While a menu is open, SDL's synthesized mouse events are used as a cursor.
++*/
++
++#ifdef USE_INTERNAL_SDL_HEADERS
++#	include "SDL.h"
++#else
++#	include <SDL.h>
++#endif
++
++#include <math.h>
++
++#include "../client/client.h"
++
++#define TOUCH_MAX_FINGERS 10
++
++typedef enum {
++	TB_COMMAND,     // "+cmd" on press, "-cmd" on release
++	TB_ONESHOT,     // command executed once on press
++	TB_TOGGLE,      // "+cmd" / "-cmd" alternating on every press
++	TB_KEY,         // send a key event
++	TB_KEYBOARD,    // toggle the on-screen keyboard
++} touchButtonType_t;
++
++typedef enum {
++	TV_GAME = 1,    // visible while playing
++	TV_MENU = 2,    // visible while a menu/console is open
++} touchVisibility_t;
++
++typedef struct {
++	const char        *label;
++	touchButtonType_t type;
++	const char        *cmd;
++	int               key;
++	float             x, y;     // center, x in screen widths, y in screen heights
++	float             r;        // radius in screen heights
++	int               vis;
++	qboolean          lookWhileHeld; // finger may drag to look while held (fire)
++
++	// runtime state
++	qboolean          down;
++	qboolean          toggled;
++} touchButton_t;
++
++static touchButton_t touchButtons[] = {
++	// label    type          cmd                 key         x      y      r      visibility       look
++	{ "FIRE",   TB_COMMAND,   "attackprimary",    0,          0.82f, 0.66f, 0.11f, TV_GAME,         qtrue  },
++	{ "ALT",    TB_COMMAND,   "attacksecondary",  0,          0.94f, 0.48f, 0.065f, TV_GAME,        qtrue  },
++	{ "JUMP",   TB_COMMAND,   "moveup",           0,          0.94f, 0.82f, 0.075f, TV_GAME,        qfalse },
++	{ "CROUCH", TB_TOGGLE,    "movedown",         0,          0.68f, 0.86f, 0.065f, TV_GAME,        qfalse },
++	{ "RELOAD", TB_ONESHOT,   "reload",           0,          0.66f, 0.62f, 0.06f, TV_GAME,         qfalse },
++	{ "USE",    TB_COMMAND,   "use",              0,          0.80f, 0.40f, 0.06f, TV_GAME,         qfalse },
++	{ "<LEAN",  TB_COMMAND,   "leanleft",         0,          0.60f, 0.12f, 0.055f, TV_GAME,        qfalse },
++	{ "LEAN>",  TB_COMMAND,   "leanright",        0,          0.70f, 0.12f, 0.055f, TV_GAME,        qfalse },
++	{ "WPN-",   TB_ONESHOT,   "weapprev",         0,          0.82f, 0.12f, 0.055f, TV_GAME,        qfalse },
++	{ "WPN+",   TB_ONESHOT,   "weapnext",         0,          0.93f, 0.12f, 0.055f, TV_GAME,        qfalse },
++	{ "SCORE",  TB_COMMAND,   "scores",           0,          0.22f, 0.08f, 0.05f, TV_GAME,         qfalse },
++	{ "MENU",   TB_KEY,       NULL,               K_ESCAPE,   0.05f, 0.08f, 0.05f, TV_GAME,         qfalse },
++	{ "KBD",    TB_KEYBOARD,  NULL,               0,          0.13f, 0.08f, 0.05f, TV_GAME|TV_MENU, qfalse },
++	{ "~",      TB_KEY,       NULL,               K_CONSOLE,  0.30f, 0.08f, 0.04f, TV_GAME,         qfalse },
++};
++
++#define NUM_TOUCH_BUTTONS ( sizeof( touchButtons ) / sizeof( touchButtons[0] ) )
++
++typedef enum {
++	FR_NONE,
++	FR_STICK,
++	FR_LOOK,
++	FR_BUTTON,
++} fingerRole_t;
++
++typedef struct {
++	qboolean     active;
++	SDL_FingerID id;
++	fingerRole_t role;
++	int          button;   // index into touchButtons when role == FR_BUTTON
++	float        lastX, lastY;
++} touchFinger_t;
++
++static touchFinger_t fingers[TOUCH_MAX_FINGERS];
++
++static cvar_t *in_touch;
++static cvar_t *in_touchSens;
++static cvar_t *in_touchSensY;
++static cvar_t *in_touchAlpha;
++static cvar_t *in_touchScale;
++static cvar_t *in_touchStickSize;
++static cvar_t *in_touchInvertY;
++
++// movement stick state
++static qboolean stickActive;
++static float    stickOriginX, stickOriginY; // normalized
++static float    stickX, stickY;             // -1..1
++
++// accumulated look deltas (normalized screen units) waiting for the next usercmd
++static float lookAccumX, lookAccumY;
++
++static qboolean     touchWasInGame;
++static fontheader_t *touchFont;
++
++/*
++===============
++Helpers
++===============
++*/
++static float Touch_Aspect( void ) {
++	int w = cls.glconfig.vidWidth;
++	int h = cls.glconfig.vidHeight;
++
++	if ( w <= 0 || h <= 0 ) {
++		return 16.0f / 9.0f;
++	}
++	return (float)w / (float)h;
++}
++
++qboolean IN_Touch_Enabled( void ) {
++	return in_touch && in_touch->integer != 0;
++}
++
++static qboolean Touch_InGame( void ) {
++	if ( clc.state != CA_ACTIVE ) {
++		return qfalse;
++	}
++	if ( Key_GetCatcher() & ( KEYCATCH_UI | KEYCATCH_CONSOLE | KEYCATCH_MESSAGE ) ) {
++		return qfalse;
++	}
++	return qtrue;
++}
++
++static int Touch_CurrentVisibility( void ) {
++	return Touch_InGame() ? TV_GAME : TV_MENU;
++}
++
++static void Touch_SendButtonCommand( touchButton_t *b, qboolean down ) {
++	switch ( b->type ) {
++	case TB_COMMAND:
++		Cbuf_AddText( va( "%c%s\n", down ? '+' : '-', b->cmd ) );
++		break;
++	case TB_ONESHOT:
++		if ( down ) {
++			Cbuf_AddText( va( "%s\n", b->cmd ) );
++		}
++		break;
++	case TB_TOGGLE:
++		if ( down ) {
++			b->toggled = !b->toggled;
++			Cbuf_AddText( va( "%c%s\n", b->toggled ? '+' : '-', b->cmd ) );
++		}
++		break;
++	case TB_KEY:
++		Com_QueueEvent( Sys_Milliseconds(), SE_KEY, b->key, down, 0, NULL );
++		break;
++	case TB_KEYBOARD:
++		if ( down ) {
++			if ( SDL_IsTextInputActive() ) {
++				SDL_StopTextInput();
++			} else {
++				SDL_StartTextInput();
++			}
++		}
++		break;
++	}
++}
++
++/*
++===============
++Touch_ReleaseAll
++
++Releases every held control (used when a menu pops up, so that
++nothing stays stuck, e.g. the fire button)
++===============
++*/
++static void Touch_ReleaseAll( void ) {
++	int i;
++
++	for ( i = 0; i < (int)NUM_TOUCH_BUTTONS; i++ ) {
++		touchButton_t *b = &touchButtons[i];
++
++		if ( b->down ) {
++			b->down = qfalse;
++			if ( b->type == TB_COMMAND || b->type == TB_KEY ) {
++				Touch_SendButtonCommand( b, qfalse );
++			}
++		}
++	}
++
++	for ( i = 0; i < TOUCH_MAX_FINGERS; i++ ) {
++		fingers[i].active = qfalse;
++	}
++
++	stickActive = qfalse;
++	stickX = stickY = 0;
++	lookAccumX = lookAccumY = 0;
++}
++
++/*
++===============
++Touch_ResetToggles
++
++Crouch toggle is reset when the player leaves the game
++===============
++*/
++static void Touch_ResetToggles( void ) {
++	int i;
++
++	for ( i = 0; i < (int)NUM_TOUCH_BUTTONS; i++ ) {
++		touchButton_t *b = &touchButtons[i];
++
++		if ( b->type == TB_TOGGLE && b->toggled ) {
++			b->toggled = qfalse;
++			Cbuf_AddText( va( "-%s\n", b->cmd ) );
++		}
++	}
++}
++
++static int Touch_HitButton( float x, float y ) {
++	int   i;
++	int   vis = Touch_CurrentVisibility();
++	float aspect = Touch_Aspect();
++	float scale = in_touchScale->value;
++
++	for ( i = 0; i < (int)NUM_TOUCH_BUTTONS; i++ ) {
++		const touchButton_t *b = &touchButtons[i];
++		float dx, dy, r;
++
++		if ( !( b->vis & vis ) ) {
++			continue;
++		}
++
++		// compare in screen-height units, give a bit of extra slack for fat fingers
++		dx = ( x - b->x ) * aspect;
++		dy = y - b->y;
++		r = b->r * scale * 1.15f;
++
++		if ( dx * dx + dy * dy <= r * r ) {
++			return i;
++		}
++	}
++
++	return -1;
++}
++
++static touchFinger_t *Touch_FindFinger( SDL_FingerID id ) {
++	int i;
++
++	for ( i = 0; i < TOUCH_MAX_FINGERS; i++ ) {
++		if ( fingers[i].active && fingers[i].id == id ) {
++			return &fingers[i];
++		}
++	}
++	return NULL;
++}
++
++static touchFinger_t *Touch_AllocFinger( SDL_FingerID id ) {
++	int i;
++
++	for ( i = 0; i < TOUCH_MAX_FINGERS; i++ ) {
++		if ( !fingers[i].active ) {
++			Com_Memset( &fingers[i], 0, sizeof( fingers[i] ) );
++			fingers[i].active = qtrue;
++			fingers[i].id = id;
++			return &fingers[i];
++		}
++	}
++	return NULL;
++}
++
++static void Touch_UpdateStick( float x, float y ) {
++	float aspect = Touch_Aspect();
++	float radius = in_touchStickSize->value * in_touchScale->value;
++	float dx = ( x - stickOriginX ) * aspect;
++	float dy = y - stickOriginY;
++	float len = sqrtf( dx * dx + dy * dy );
++
++	if ( radius <= 0.01f ) {
++		radius = 0.01f;
++	}
++
++	if ( len > radius ) {
++		// drag the origin along, so the stick never gets "stuck" at the edge
++		float excess = len - radius;
++		stickOriginX += ( dx / len ) * excess / aspect;
++		stickOriginY += ( dy / len ) * excess;
++		dx = dx / len * radius;
++		dy = dy / len * radius;
++	}
++
++	stickX = dx / radius;
++	stickY = dy / radius;
++}
++
++/*
++===============
++IN_Touch_HandleEvent
++
++Returns qtrue if the event was consumed by the touch controls
++===============
++*/
++qboolean IN_Touch_HandleEvent( const void *event ) {
++	const SDL_Event *e = (const SDL_Event *)event;
++	touchFinger_t   *f;
++	float           x, y;
++
++	if ( !IN_Touch_Enabled() ) {
++		return qfalse;
++	}
++
++	switch ( e->type ) {
++	case SDL_FINGERDOWN:
++		x = e->tfinger.x;
++		y = e->tfinger.y;
++
++		{
++			int btn = Touch_HitButton( x, y );
++
++			if ( !Touch_InGame() ) {
++				// in menus, only the menu-visible buttons react; everything else
++				// is left to SDL's touch -> mouse emulation
++				if ( btn >= 0 ) {
++					Touch_SendButtonCommand( &touchButtons[btn], qtrue );
++					Touch_SendButtonCommand( &touchButtons[btn], qfalse );
++					return qtrue;
++				}
++				return qfalse;
++			}
++
++			f = Touch_AllocFinger( e->tfinger.fingerId );
++			if ( !f ) {
++				return qtrue;
++			}
++
++			f->lastX = x;
++			f->lastY = y;
++
++			if ( btn >= 0 ) {
++				touchButton_t *b = &touchButtons[btn];
++
++				f->role = FR_BUTTON;
++				f->button = btn;
++				b->down = qtrue;
++				Touch_SendButtonCommand( b, qtrue );
++			} else if ( x < 0.45f && !stickActive ) {
++				f->role = FR_STICK;
++				stickActive = qtrue;
++				stickOriginX = x;
++				stickOriginY = y;
++				stickX = stickY = 0;
++			} else {
++				f->role = FR_LOOK;
++			}
++		}
++		return qtrue;
++
++	case SDL_FINGERMOTION:
++		f = Touch_FindFinger( e->tfinger.fingerId );
++		if ( !f ) {
++			return Touch_InGame();
++		}
++
++		x = e->tfinger.x;
++		y = e->tfinger.y;
++
++		switch ( f->role ) {
++		case FR_STICK:
++			Touch_UpdateStick( x, y );
++			break;
++		case FR_LOOK:
++			lookAccumX += ( x - f->lastX ) * Touch_Aspect();
++			lookAccumY += ( y - f->lastY );
++			break;
++		case FR_BUTTON:
++			if ( touchButtons[f->button].lookWhileHeld ) {
++				lookAccumX += ( x - f->lastX ) * Touch_Aspect();
++				lookAccumY += ( y - f->lastY );
++			}
++			break;
++		default:
++			break;
++		}
++
++		f->lastX = x;
++		f->lastY = y;
++		return qtrue;
++
++	case SDL_FINGERUP:
++		f = Touch_FindFinger( e->tfinger.fingerId );
++		if ( !f ) {
++			return Touch_InGame();
++		}
++
++		switch ( f->role ) {
++		case FR_STICK:
++			stickActive = qfalse;
++			stickX = stickY = 0;
++			break;
++		case FR_BUTTON:
++			{
++				touchButton_t *b = &touchButtons[f->button];
++
++				if ( b->down ) {
++					b->down = qfalse;
++					Touch_SendButtonCommand( b, qfalse );
++				}
++			}
++			break;
++		default:
++			break;
++		}
++
++		f->active = qfalse;
++		return qtrue;
++
++	default:
++		break;
++	}
++
++	return qfalse;
++}
++
++/*
++===============
++IN_Touch_Move
++
++Adds touch movement and look to the user command
++===============
++*/
++void IN_Touch_Move( usercmd_t *cmd ) {
++	float sens, sensY, cgameSens;
++	float yaw, pitch;
++
++	if ( !IN_Touch_Enabled() ) {
++		return;
++	}
++
++	if ( !Touch_InGame() ) {
++		if ( touchWasInGame ) {
++			Touch_ReleaseAll();
++			if ( clc.state != CA_ACTIVE ) {
++				Touch_ResetToggles();
++			}
++		}
++		touchWasInGame = qfalse;
++		lookAccumX = lookAccumY = 0;
++		return;
++	}
++	touchWasInGame = qtrue;
++
++	// movement
++	if ( stickActive ) {
++		float mag = sqrtf( stickX * stickX + stickY * stickY );
++
++		// small dead zone
++		if ( mag > 0.12f ) {
++			cmd->forwardmove = ClampChar( cmd->forwardmove + (int)( -stickY * 127.0f ) );
++			cmd->rightmove = ClampChar( cmd->rightmove + (int)( stickX * 127.0f ) );
++		}
++	}
++
++	// looking: one full screen height swipe == 120 degrees at sensitivity 1
++	sens = in_touchSens->value;
++	sensY = in_touchSensY->value;
++
++	cgameSens = 1.0f;
++	if ( cge && cge->CG_SensitivityScale() >= 0.0f ) {
++		// scoped weapons slow down the look speed
++		cgameSens = cge->CG_SensitivityScale();
++	}
++
++	yaw = lookAccumX * 120.0f * sens * cgameSens;
++	pitch = lookAccumY * 120.0f * sens * sensY * cgameSens;
++
++	if ( in_touchInvertY->integer ) {
++		pitch = -pitch;
++	}
++
++	if ( yaw != 0.0f || pitch != 0.0f ) {
++		cl.viewangles[YAW] -= yaw;
++		cl.viewangles[PITCH] += pitch;
++		cmd->buttons |= BUTTON_ANY;
++	}
++
++	lookAccumX = lookAccumY = 0;
++}
++
++/*
++===============
++Drawing
++===============
++*/
++static void Touch_DrawDisc( float cx, float cy, float r, const vec4_t color ) {
++	// approximate a filled circle with horizontal strips
++	const int strips = 14;
++	int       i;
++	float     stripH = ( 2.0f * r ) / strips;
++
++	re.SetColor( color );
++
++	for ( i = 0; i < strips; i++ ) {
++		float yMid = -r + ( i + 0.5f ) * stripH;
++		float half = sqrtf( r * r - yMid * yMid );
++
++		re.DrawBox( cx - half, cy - r + i * stripH, half * 2.0f, stripH );
++	}
++}
++
++static void Touch_DrawLabel( const char *text, float cx, float cy, float pixelHeight ) {
++	vec2_t scale;
++	float  w, h;
++
++	if ( !touchFont ) {
++		return;
++	}
++
++	h = re.GetFontHeight( touchFont );
++	if ( h <= 0 ) {
++		return;
++	}
++
++	scale[0] = scale[1] = ( pixelHeight / h );
++
++	w = re.GetFontStringWidth( touchFont, text ) * scale[0];
++
++	re.SetColor( colorWhite );
++	re.DrawString( touchFont, text, cx - w * 0.5f, cy - pixelHeight * 0.5f, -1, scale );
++}
++
++void IN_Touch_Draw( void ) {
++	int   i;
++	int   vis;
++	float W, H;
++	float alpha;
++	vec4_t col;
++
++	if ( !IN_Touch_Enabled() ) {
++		return;
++	}
++
++	if ( clc.state != CA_ACTIVE && clc.state != CA_DISCONNECTED ) {
++		// loading screens etc.
++		return;
++	}
++
++	W = cls.glconfig.vidWidth;
++	H = cls.glconfig.vidHeight;
++	if ( W <= 0 || H <= 0 ) {
++		return;
++	}
++
++	if ( !touchFont ) {
++		touchFont = re.LoadFont( "verdana-14" );
++	}
++
++	vis = Touch_CurrentVisibility();
++	alpha = in_touchAlpha->value;
++
++	re.Set2DWindow( 0, 0, W, H, 0, W, H, 0, -1, 1 );
++
++	for ( i = 0; i < (int)NUM_TOUCH_BUTTONS; i++ ) {
++		const touchButton_t *b = &touchButtons[i];
++		float cx, cy, r;
++		qboolean lit;
++
++		if ( !( b->vis & vis ) ) {
++			continue;
++		}
++
++		cx = b->x * W;
++		cy = b->y * H;
++		r = b->r * in_touchScale->value * H;
++
++		lit = b->down || ( b->type == TB_TOGGLE && b->toggled )
++			|| ( b->type == TB_KEYBOARD && SDL_IsTextInputActive() );
++
++		col[0] = lit ? 1.0f : 0.6f;
++		col[1] = lit ? 0.8f : 0.6f;
++		col[2] = lit ? 0.3f : 0.6f;
++		col[3] = alpha * ( lit ? 1.6f : 1.0f );
++
++		Touch_DrawDisc( cx, cy, r, col );
++		Touch_DrawLabel( b->label, cx, cy, r * 0.55f );
++	}
++
++	if ( vis == TV_GAME && stickActive ) {
++		float baseR = in_touchStickSize->value * in_touchScale->value * H;
++		float ox = stickOriginX * W;
++		float oy = stickOriginY * H;
++
++		col[0] = col[1] = col[2] = 0.6f;
++		col[3] = alpha * 0.8f;
++		Touch_DrawDisc( ox, oy, baseR, col );
++
++		col[0] = col[1] = col[2] = 0.9f;
++		col[3] = alpha * 1.8f;
++		Touch_DrawDisc( ox + stickX * baseR, oy + stickY * baseR, baseR * 0.45f, col );
++	}
++
++	re.SetColor( NULL );
++}
++
++/*
++===============
++IN_Touch_Init
++===============
++*/
++void IN_Touch_Init( void ) {
++#ifdef __ANDROID__
++	const char *defaultEnabled = "1";
++#else
++	const char *defaultEnabled = "0";
++#endif
++
++	in_touch = Cvar_Get( "in_touch", defaultEnabled, CVAR_ARCHIVE );
++	in_touchSens = Cvar_Get( "in_touchSens", "1.0", CVAR_ARCHIVE );
++	in_touchSensY = Cvar_Get( "in_touchSensY", "0.8", CVAR_ARCHIVE );
++	in_touchAlpha = Cvar_Get( "in_touchAlpha", "0.25", CVAR_ARCHIVE );
++	in_touchScale = Cvar_Get( "in_touchScale", "1.0", CVAR_ARCHIVE );
++	in_touchStickSize = Cvar_Get( "in_touchStickSize", "0.13", CVAR_ARCHIVE );
++	in_touchInvertY = Cvar_Get( "in_touchInvertY", "0", CVAR_ARCHIVE );
++
++	Com_Memset( fingers, 0, sizeof( fingers ) );
++	stickActive = qfalse;
++	touchFont = NULL;
++}
++
++/*
++===============
++IN_Touch_BlockMouse
++
++While playing, SDL's touch -> mouse emulation must be ignored,
++otherwise every touch would also shoot / turn the camera
++===============
++*/
++qboolean IN_Touch_BlockMouse( void ) {
++	return IN_Touch_Enabled() && Touch_InGame();
++}
+diff --git a/code/sys/new/sys_unix_new.c b/code/sys/new/sys_unix_new.c
+index 3939fd3..e393451 100644
+--- a/code/sys/new/sys_unix_new.c
++++ b/code/sys/new/sys_unix_new.c
+@@ -24,7 +24,12 @@ Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA  02110-1301  USA
+ 
+ #include <signal.h>
+ #include <unistd.h>
++#if defined(__ANDROID__) && __ANDROID_API__ < 33
++// backtrace() is only available from Android 13 (API 33)
++#define NO_EXECINFO
++#else
+ #include <execinfo.h>
++#endif
+ 
+ /*
+ ==================
+@@ -49,6 +54,10 @@ Sys_PrintBackTrace
+ ==================
+ */
+ void Sys_PrintBackTrace() {
++#ifdef NO_EXECINFO
++    fprintf(stderr, "(backtrace not available on this platform)\n");
++}
++#else
+     void* backtrace_arr[128];
+     char** backtrace_symbols_arr;
+     size_t backtrace_size;
+@@ -62,6 +71,7 @@ void Sys_PrintBackTrace() {
+         fprintf(stderr, "=> %s\n", backtrace_symbols_arr[i]);
+     }
+ }
++#endif
+ 
+ /*
+ ==============
+diff --git a/code/sys/sys_main.c b/code/sys/sys_main.c
+index 9487576..b27c9e6 100644
+--- a/code/sys/sys_main.c
++++ b/code/sys/sys_main.c
+@@ -518,6 +518,27 @@ void *Sys_LoadDll(const char *name, qboolean useSystemLib)
+ 		return NULL;
+ 	}
+ 
++#ifdef __ANDROID__
++	{
++		// Android only packages (and extracts) native libraries named lib*.so,
++		// and they can be loaded by their bare name from the app's library path
++		static char androidName[MAX_OSPATH];
++
++		if(Q_strncmp(name, "lib", 3))
++		{
++			Com_sprintf(androidName, sizeof(androidName), "lib%s", name);
++			name = androidName;
++		}
++
++		Com_Printf("Trying to load \"%s\" (Android)...\n", name);
++		dllhandle = Sys_LoadLibrary(name);
++		if(dllhandle)
++			return dllhandle;
++
++		Com_Printf("Loading \"%s\" by name failed: %s\n", name, Sys_LibraryError());
++	}
++#endif
++
+ 	if(useSystemLib)
+ 	{
+ 		Com_Printf("Trying to load \"%s\"...\n", name);
+@@ -832,8 +853,24 @@ int main( int argc, char **argv )
+ #endif
+ 
+ 	Sys_ParseArgs( argc, argv );
++#ifdef __ANDROID__
++	{
++		// Paths are provided by the Java activity through environment variables
++		const char *libDir = getenv( "OPENMOHAA_LIBDIR" );
++		const char *baseDir = getenv( "OPENMOHAA_BASEDIR" );
++
++		Sys_SetBinaryPath( libDir && *libDir ? libDir : "." );
++		Sys_SetDefaultInstallPath( baseDir && *baseDir ? baseDir : "." );
++
++		if ( baseDir && *baseDir ) {
++			// Keep configs and saves next to the game data, where the user can reach them
++			Q_strcat( commandLine, sizeof( commandLine ), va( "+set fs_basepath \"%s\" +set fs_homepath \"%s/home\" ", baseDir, baseDir ) );
++		}
++	}
++#else
+ 	Sys_SetBinaryPath( Sys_Dirname( argv[ 0 ] ) );
+ 	Sys_SetDefaultInstallPath( DEFAULT_BASEDIR );
++#endif
+ 
+ 	// Concatenate the command line for passing to Com_Init
+ 	for( i = 1; i < argc; i++ )
+diff --git a/code/sys/sys_unix.c b/code/sys/sys_unix.c
+index 4395051..7d3e888 100644
+--- a/code/sys/sys_unix.c
++++ b/code/sys/sys_unix.c
+@@ -1112,6 +1112,26 @@ Sys_Dialog
+ Display a *nix dialog box
+ ==============
+ */
++#if defined(__ANDROID__) && !defined(DEDICATED)
++#include <SDL.h>
++#include <android/log.h>
++
++dialogResult_t Sys_Dialog( dialogType_t type, const char *message, const char *title )
++{
++	// No zenity/kdialog on Android: show a native message box through SDL
++	Uint32 flags = SDL_MESSAGEBOX_INFORMATION;
++
++	__android_log_print( ANDROID_LOG_ERROR, "OpenMoHAA", "%s: %s", title, message );
++
++	if( type == DT_ERROR )
++		flags = SDL_MESSAGEBOX_ERROR;
++	else if( type == DT_WARNING )
++		flags = SDL_MESSAGEBOX_WARNING;
++
++	SDL_ShowSimpleMessageBox( flags, title, message, NULL );
++	return DR_OK;
++}
++#else
+ dialogResult_t Sys_Dialog( dialogType_t type, const char *message, const char *title )
+ {
+ 	typedef enum
+@@ -1177,6 +1197,7 @@ dialogResult_t Sys_Dialog( dialogType_t type, const char *message, const char *t
+ 	return DR_OK;
+ }
+ #endif
++#endif
+ 
+ /*
+ ==============

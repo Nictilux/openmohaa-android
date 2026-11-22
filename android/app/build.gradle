@@ -1,0 +1,65 @@
+plugins {
+    id 'com.android.application'
+}
+
+android {
+    namespace 'com.openmohaa.android'
+    compileSdk 35
+
+    defaultConfig {
+        applicationId 'com.openmohaa.android'
+        minSdk 26
+        targetSdk 35
+        versionCode((System.getenv('GITHUB_RUN_NUMBER') ?: '1') as int)
+        versionName "0.1." + (System.getenv('GITHUB_RUN_NUMBER') ?: 'dev')
+
+        ndk {
+            abiFilters 'arm64-v8a'
+        }
+    }
+
+    // Native libraries are built by build_native.sh into src/main/jniLibs
+    packaging {
+        jniLibs {
+            useLegacyPackaging true
+        }
+    }
+
+    signingConfigs {
+        // A fixed debug keystore (see .github/workflows) lets new builds install
+        // over old ones without uninstalling (and losing the imported files)
+        fixed {
+            def ks = file('../debug.keystore')
+            if (ks.exists()) {
+                storeFile ks
+                storePassword 'android'
+                keyAlias 'androiddebugkey'
+                keyPassword 'android'
+            }
+        }
+    }
+
+    buildTypes {
+        debug {
+            if (file('../debug.keystore').exists()) {
+                signingConfig signingConfigs.fixed
+            }
+        }
+        release {
+            minifyEnabled false
+            if (file('../debug.keystore').exists()) {
+                signingConfig signingConfigs.fixed
+            }
+        }
+    }
+
+    compileOptions {
+        sourceCompatibility JavaVersion.VERSION_17
+        targetCompatibility JavaVersion.VERSION_17
+    }
+
+    lint {
+        abortOnError false
+        checkReleaseBuilds false
+    }
+}
