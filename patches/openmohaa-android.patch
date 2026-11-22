@@ -201,10 +201,10 @@ index a061816..021d1f6 100644
  		gsDebugFormat(GSIDebugCat_Common, GSIDebugType_Misc, GSIDebugLevel_WarmError,
  			"Failed to cancel thread\r\n");
 diff --git a/code/sdl/sdl_glimp.c b/code/sdl/sdl_glimp.c
-index 2ac8b9e..4ddeda8 100644
+index 2ac8b9e..335c602 100644
 --- a/code/sdl/sdl_glimp.c
 +++ b/code/sdl/sdl_glimp.c
-@@ -35,6 +35,47 @@ Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA  02110-1301  USA
+@@ -35,6 +35,29 @@ Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA  02110-1301  USA
  #include "../sys/sys_local.h"
  #include "sdl_icon.h"
  
@@ -224,6 +224,65 @@ index 2ac8b9e..4ddeda8 100644
 +	SDL_GL_GetDrawableSize( SDL_window, width, height );
 +}
 +
++static qboolean GLimp_GL4ES_ExtensionSupported( const char *ext );
++#define GLIMP_EXTENSION_SUPPORTED( name ) GLimp_GL4ES_ExtensionSupported( name )
++#else
++#define GLIMP_GETPROC( name ) SDL_GL_GetProcAddress( name )
++#define GLIMP_EXTENSION_SUPPORTED( name ) SDL_GL_ExtensionSupported( name )
++#endif
++
+ typedef enum
+ {
+ 	RSERR_OK,
+@@ -266,7 +289,7 @@ static qboolean GLimp_GetProcAddresses( qboolean fixedFunction ) {
+ #ifdef __SDL_NOGETPROCADDR__
+ #define GLE( ret, name, ... ) qgl##name = gl#name;
+ #else
+-#define GLE( ret, name, ... ) qgl##name = (name##proc *) SDL_GL_GetProcAddress("gl" #name); \
++#define GLE( ret, name, ... ) qgl##name = (name##proc *) GLIMP_GETPROC("gl" #name); \
+ 	if ( qgl##name == NULL ) { \
+ 		ri.Printf( PRINT_ALL, "ERROR: Missing OpenGL function %s\n", "gl" #name ); \
+ 		success = qfalse; \
+@@ -587,10 +610,18 @@ static int GLimp_SetMode(int mode, qboolean fullscreen, qboolean noborder, qbool
+ 			numContexts++;
+ 		}
+ 	} else {
++#ifdef USE_GL4ES
++		// gl4es needs an OpenGL ES 2.0 context
++		contexts[numContexts].profileMask = SDL_GL_CONTEXT_PROFILE_ES;
++		contexts[numContexts].majorVersion = 2;
++		contexts[numContexts].minorVersion = 0;
++		numContexts++;
++#else
+ 		contexts[numContexts].profileMask = 0;
+ 		contexts[numContexts].majorVersion = 1;
+ 		contexts[numContexts].minorVersion = 1;
+ 		numContexts++;
++#endif
+ 	}
+ 
+ 	for (i = 0; i < 16; i++)
+@@ -732,6 +763,15 @@ static int GLimp_SetMode(int mode, qboolean fullscreen, qboolean noborder, qbool
+ 				continue;
+ 			}
+ 
++#ifdef USE_GL4ES
++			if ( !gl4es_initialized ) {
++				set_getprocaddress( (void *(*)(const char *))SDL_GL_GetProcAddress );
++				set_getmainfbsize( GLimp_GL4ES_GetMainFBSize );
++				initialize_gl4es();
++				gl4es_initialized = qtrue;
++			}
++#endif
++
+ 			if ( !GLimp_GetProcAddresses( fixedFunction ) )
+ 			{
+ 				ri.Printf( PRINT_ALL, "GLimp_GetProcAddresses() for %s context failed\n", contextName );
+@@ -889,6 +929,28 @@ static qboolean GLimp_StartDriverAndSetMode(int mode, qboolean fullscreen, qbool
+ }
+ 
+ 
++#ifdef USE_GL4ES
 +// SDL_GL_ExtensionSupported() checks the extensions of the real OpenGL ES
 +// context, not the desktop GL extensions gl4es emulates (multitexture etc.),
 +// so look them up in gl4es' own extension string instead
@@ -243,60 +302,12 @@ index 2ac8b9e..4ddeda8 100644
 +	}
 +	return qfalse;
 +}
-+#define GLIMP_EXTENSION_SUPPORTED( name ) GLimp_GL4ES_ExtensionSupported( name )
-+#else
-+#define GLIMP_GETPROC( name ) SDL_GL_GetProcAddress( name )
-+#define GLIMP_EXTENSION_SUPPORTED( name ) SDL_GL_ExtensionSupported( name )
 +#endif
 +
- typedef enum
- {
- 	RSERR_OK,
-@@ -266,7 +307,7 @@ static qboolean GLimp_GetProcAddresses( qboolean fixedFunction ) {
- #ifdef __SDL_NOGETPROCADDR__
- #define GLE( ret, name, ... ) qgl##name = gl#name;
- #else
--#define GLE( ret, name, ... ) qgl##name = (name##proc *) SDL_GL_GetProcAddress("gl" #name); \
-+#define GLE( ret, name, ... ) qgl##name = (name##proc *) GLIMP_GETPROC("gl" #name); \
- 	if ( qgl##name == NULL ) { \
- 		ri.Printf( PRINT_ALL, "ERROR: Missing OpenGL function %s\n", "gl" #name ); \
- 		success = qfalse; \
-@@ -587,10 +628,18 @@ static int GLimp_SetMode(int mode, qboolean fullscreen, qboolean noborder, qbool
- 			numContexts++;
- 		}
- 	} else {
-+#ifdef USE_GL4ES
-+		// gl4es needs an OpenGL ES 2.0 context
-+		contexts[numContexts].profileMask = SDL_GL_CONTEXT_PROFILE_ES;
-+		contexts[numContexts].majorVersion = 2;
-+		contexts[numContexts].minorVersion = 0;
-+		numContexts++;
-+#else
- 		contexts[numContexts].profileMask = 0;
- 		contexts[numContexts].majorVersion = 1;
- 		contexts[numContexts].minorVersion = 1;
- 		numContexts++;
-+#endif
- 	}
- 
- 	for (i = 0; i < 16; i++)
-@@ -732,6 +781,15 @@ static int GLimp_SetMode(int mode, qboolean fullscreen, qboolean noborder, qbool
- 				continue;
- 			}
- 
-+#ifdef USE_GL4ES
-+			if ( !gl4es_initialized ) {
-+				set_getprocaddress( (void *(*)(const char *))SDL_GL_GetProcAddress );
-+				set_getmainfbsize( GLimp_GL4ES_GetMainFBSize );
-+				initialize_gl4es();
-+				gl4es_initialized = qtrue;
-+			}
-+#endif
-+
- 			if ( !GLimp_GetProcAddresses( fixedFunction ) )
- 			{
- 				ri.Printf( PRINT_ALL, "GLimp_GetProcAddresses() for %s context failed\n", contextName );
-@@ -907,8 +965,8 @@ static void GLimp_InitExtensions( qboolean fixedFunction )
+ /*
+ ===============
+ GLimp_InitExtensions
+@@ -907,8 +969,8 @@ static void GLimp_InitExtensions( qboolean fixedFunction )
  	glConfig.textureCompression = TC_NONE;
  
  	// GL_EXT_texture_compression_s3tc
@@ -307,7 +318,7 @@ index 2ac8b9e..4ddeda8 100644
  	{
  		if ( r_ext_compressed_textures->value )
  		{
-@@ -928,7 +986,7 @@ static void GLimp_InitExtensions( qboolean fixedFunction )
+@@ -928,7 +990,7 @@ static void GLimp_InitExtensions( qboolean fixedFunction )
  	// GL_S3_s3tc ... legacy extension before GL_EXT_texture_compression_s3tc.
  	if (glConfig.textureCompression == TC_NONE)
  	{
@@ -316,7 +327,7 @@ index 2ac8b9e..4ddeda8 100644
  		{
  			if ( r_ext_compressed_textures->value )
  			{
-@@ -951,7 +1009,7 @@ static void GLimp_InitExtensions( qboolean fixedFunction )
+@@ -951,7 +1013,7 @@ static void GLimp_InitExtensions( qboolean fixedFunction )
  	{
  		// GL_EXT_texture_env_add
  		glConfig.textureEnvAddAvailable = qfalse;
@@ -325,7 +336,7 @@ index 2ac8b9e..4ddeda8 100644
  		{
  			if ( r_ext_texture_env_add->integer )
  			{
-@@ -973,13 +1031,13 @@ static void GLimp_InitExtensions( qboolean fixedFunction )
+@@ -973,13 +1035,13 @@ static void GLimp_InitExtensions( qboolean fixedFunction )
  		qglMultiTexCoord2fARB = NULL;
  		qglActiveTextureARB = NULL;
  		qglClientActiveTextureARB = NULL;
@@ -343,7 +354,7 @@ index 2ac8b9e..4ddeda8 100644
  
  				if ( qglActiveTextureARB )
  				{
-@@ -1010,13 +1068,13 @@ static void GLimp_InitExtensions( qboolean fixedFunction )
+@@ -1010,13 +1072,13 @@ static void GLimp_InitExtensions( qboolean fixedFunction )
  		}
  
  		// GL_EXT_compiled_vertex_array
@@ -360,7 +371,7 @@ index 2ac8b9e..4ddeda8 100644
  				if (!qglLockArraysEXT || !qglUnlockArraysEXT)
  				{
  					ri.Error (ERR_FATAL, "bad getprocaddress");
-@@ -1034,7 +1092,7 @@ static void GLimp_InitExtensions( qboolean fixedFunction )
+@@ -1034,7 +1096,7 @@ static void GLimp_InitExtensions( qboolean fixedFunction )
  	}
  
  	textureFilterAnisotropic = qfalse;
@@ -369,7 +380,7 @@ index 2ac8b9e..4ddeda8 100644
  	{
  		if ( r_ext_texture_filter_anisotropic->integer ) {
  			qglGetIntegerv( GL_MAX_TEXTURE_MAX_ANISOTROPY_EXT, (GLint *)&maxAnisotropy );
-@@ -1059,7 +1117,7 @@ static void GLimp_InitExtensions( qboolean fixedFunction )
+@@ -1059,7 +1121,7 @@ static void GLimp_InitExtensions( qboolean fixedFunction )
  	}
  
  	haveClampToEdge = qfalse;
@@ -378,7 +389,7 @@ index 2ac8b9e..4ddeda8 100644
  	{
  		ri.Printf( PRINT_ALL, "...using GL_SGIS_texture_edge_clamp\n" );
  		haveClampToEdge = qtrue;
-@@ -1192,6 +1250,9 @@ void GLimp_EndFrame( void )
+@@ -1192,6 +1254,9 @@ void GLimp_EndFrame( void )
  	// don't flip if drawing to front buffer
  	if ( Q_stricmp( r_drawBuffer->string, "GL_FRONT" ) != 0 )
  	{
@@ -464,10 +475,10 @@ index 74761af..2e4e5a3 100644
  	IN_DeactivateMouse( Cvar_VariableIntegerValue( "r_fullscreen" ) != 0 );
 diff --git a/code/sdl/sdl_touch.c b/code/sdl/sdl_touch.c
 new file mode 100644
-index 0000000..a38ceed
+index 0000000..c37535c
 --- /dev/null
 +++ b/code/sdl/sdl_touch.c
-@@ -0,0 +1,665 @@
+@@ -0,0 +1,711 @@
 +/*
 +===========================================================================
 +Touch screen controls for OpenMoHAA (Android port)
@@ -518,6 +529,7 @@ index 0000000..a38ceed
 +
 +typedef struct {
 +	const char        *label;
++	const char        *labelRu;  // Windows-1251, used with the Russian version of the game
 +	touchButtonType_t type;
 +	const char        *cmd;
 +	int               key;
@@ -532,21 +544,21 @@ index 0000000..a38ceed
 +} touchButton_t;
 +
 +static touchButton_t touchButtons[] = {
-+	// label    type          cmd                 key         x      y      r      visibility       look
-+	{ "FIRE",   TB_COMMAND,   "attackprimary",    0,          0.82f, 0.66f, 0.11f, TV_GAME,         qtrue  },
-+	{ "ALT",    TB_COMMAND,   "attacksecondary",  0,          0.94f, 0.48f, 0.065f, TV_GAME,        qtrue  },
-+	{ "JUMP",   TB_COMMAND,   "moveup",           0,          0.94f, 0.82f, 0.075f, TV_GAME,        qfalse },
-+	{ "CROUCH", TB_TOGGLE,    "movedown",         0,          0.68f, 0.86f, 0.065f, TV_GAME,        qfalse },
-+	{ "RELOAD", TB_ONESHOT,   "reload",           0,          0.66f, 0.62f, 0.06f, TV_GAME,         qfalse },
-+	{ "USE",    TB_COMMAND,   "use",              0,          0.80f, 0.40f, 0.06f, TV_GAME,         qfalse },
-+	{ "<LEAN",  TB_COMMAND,   "leanleft",         0,          0.60f, 0.12f, 0.055f, TV_GAME,        qfalse },
-+	{ "LEAN>",  TB_COMMAND,   "leanright",        0,          0.70f, 0.12f, 0.055f, TV_GAME,        qfalse },
-+	{ "WPN-",   TB_ONESHOT,   "weapprev",         0,          0.82f, 0.12f, 0.055f, TV_GAME,        qfalse },
-+	{ "WPN+",   TB_ONESHOT,   "weapnext",         0,          0.93f, 0.12f, 0.055f, TV_GAME,        qfalse },
-+	{ "MENU",   TB_KEY,       NULL,               K_ESCAPE,   0.10f, 0.09f, 0.05f, TV_GAME,         qfalse },
-+	{ "SCORE",  TB_COMMAND,   "scores",           0,          0.18f, 0.09f, 0.05f, TV_GAME,         qfalse },
-+	{ "KBD",    TB_KEYBOARD,  NULL,               0,          0.26f, 0.09f, 0.05f, TV_GAME|TV_MENU, qfalse },
-+	{ "~",      TB_KEY,       NULL,               K_CONSOLE,  0.33f, 0.09f, 0.04f, TV_GAME,         qfalse },
++	// label    labelRu       type          cmd                 key         x      y      r      visibility       look
++	{ "FIRE", "\xCE\xC3\xCE\xCD\xDC",   TB_COMMAND,   "attackprimary",    0,          0.82f, 0.66f, 0.11f, TV_GAME,         qtrue  },
++	{ "ALT", "\xD3\xC4\xC0\xD0",    TB_COMMAND,   "attacksecondary",  0,          0.94f, 0.48f, 0.065f, TV_GAME,        qtrue  },
++	{ "JUMP", "\xCF\xD0\xDB\xC6\xCE\xCA",   TB_COMMAND,   "moveup",           0,          0.94f, 0.82f, 0.075f, TV_GAME,        qfalse },
++	{ "CROUCH", "\xD1\xC5\xD1\xD2\xDC", TB_TOGGLE,    "movedown",         0,          0.68f, 0.86f, 0.065f, TV_GAME,        qfalse },
++	{ "RELOAD", "\xCF\xC5\xD0\xC5\xC7.", TB_ONESHOT,   "reload",           0,          0.66f, 0.62f, 0.06f, TV_GAME,         qfalse },
++	{ "USE", "\xC8\xD1\xCF.",    TB_COMMAND,   "use",              0,          0.80f, 0.40f, 0.06f, TV_GAME,         qfalse },
++	{ "<LEAN", "<\xC2\xDB\xC3\xCB",  TB_COMMAND,   "leanleft",         0,          0.60f, 0.12f, 0.055f, TV_GAME,        qfalse },
++	{ "LEAN>", "\xC2\xDB\xC3\xCB>",  TB_COMMAND,   "leanright",        0,          0.70f, 0.12f, 0.055f, TV_GAME,        qfalse },
++	{ "WPN-", "<\xCE\xD0\xD3\xC6",   TB_ONESHOT,   "weapprev",         0,          0.82f, 0.12f, 0.055f, TV_GAME,        qfalse },
++	{ "WPN+", "\xCE\xD0\xD3\xC6>",   TB_ONESHOT,   "weapnext",         0,          0.93f, 0.12f, 0.055f, TV_GAME,        qfalse },
++	{ "MENU", "\xCC\xC5\xCD\xDE",   TB_KEY,       NULL,               K_ESCAPE,   0.10f, 0.09f, 0.05f, TV_GAME,         qfalse },
++	{ "SCORE", "\xC7\xC0\xC4\xC0\xD7\xC8",  TB_COMMAND,   "scores",           0,          0.18f, 0.09f, 0.05f, TV_GAME,         qfalse },
++	{ "KBD", "\xCA\xCB\xC0\xC2.",    TB_KEYBOARD,  NULL,               0,          0.26f, 0.09f, 0.05f, TV_GAME|TV_MENU, qfalse },
++	{ "~", "\xCA\xCE\xCD\xD1.",      TB_KEY,       NULL,               K_CONSOLE,  0.33f, 0.09f, 0.04f, TV_GAME,         qfalse },
 +};
 +
 +#define NUM_TOUCH_BUTTONS ( sizeof( touchButtons ) / sizeof( touchButtons[0] ) )
@@ -575,6 +587,7 @@ index 0000000..a38ceed
 +static cvar_t *in_touchScale;
 +static cvar_t *in_touchStickSize;
 +static cvar_t *in_touchInvertY;
++static cvar_t *in_touchLang;
 +
 +// movement stick state
 +static qboolean stickActive;
@@ -586,6 +599,7 @@ index 0000000..a38ceed
 +
 +static qboolean     touchWasInGame;
 +static fontheader_t *touchFont;
++static int          touchRussian = -1; // -1: not checked yet
 +
 +/*
 +===============
@@ -992,10 +1006,43 @@ index 0000000..a38ceed
 +	}
 +}
 +
-+static void Touch_DrawLabel( const char *text, float cx, float cy, float pixelHeight ) {
++/*
++===============
++Touch_IsRussian
++
++The Russian version of the game ships a localization file in Windows-1251
++(and fonts with Cyrillic letters), use Russian labels then
++===============
++*/
++static qboolean Touch_IsRussian( void ) {
++	if ( touchRussian < 0 ) {
++		void *buf = NULL;
++		int  len = FS_ReadFile( "global/localization.txt", &buf );
++		int  i, cyr = 0;
++
++		if ( buf && len > 0 ) {
++			const unsigned char *b = (const unsigned char *)buf;
++			for ( i = 0; i < len; i++ ) {
++				if ( b[i] >= 0xC0 ) {
++					cyr++;
++				}
++			}
++			FS_FreeFile( buf );
++		}
++
++		touchRussian = cyr > 200 ? 1 : 0;
++		if ( in_touchLang->string[0] ) {
++			touchRussian = !Q_stricmp( in_touchLang->string, "ru" );
++		}
++	}
++	return touchRussian == 1;
++}
++
++static void Touch_DrawLabel( const char *text, float cx, float cy, float pixelHeight, float maxWidth ) {
 +	static const vec4_t shadow = { 0.0f, 0.0f, 0.0f, 0.85f };
 +	vec2_t scale;
 +	float  w, h, s, x, y, off;
++	int    len;
 +
 +	if ( !touchFont ) {
 +		return;
@@ -1006,10 +1053,17 @@ index 0000000..a38ceed
 +		return;
 +	}
 +
++	// estimate the width (the renderer's width function can't handle
++	// characters above 127), and shrink long labels to fit the button
++	len = strlen( text );
++	w = len * pixelHeight * 0.62f;
++	if ( w > maxWidth && w > 0 ) {
++		pixelHeight *= maxWidth / w;
++		w = maxWidth;
++	}
++
 +	s = pixelHeight / h;
 +	scale[0] = scale[1] = s;
-+
-+	w = re.GetFontStringWidth( touchFont, text ) * s;
 +
 +	// the renderer multiplies the position by the scale as well
 +	// (virtual screen coordinates), so pass it unscaled
@@ -1077,7 +1131,7 @@ index 0000000..a38ceed
 +		col[3] = alpha * ( lit ? 1.6f : 1.0f );
 +
 +		Touch_DrawDisc( cx, cy, r, col );
-+		Touch_DrawLabel( b->label, cx, cy, r * 0.55f );
++		Touch_DrawLabel( Touch_IsRussian() ? b->labelRu : b->label, cx, cy, r * 0.55f, r * 1.8f );
 +	}
 +
 +	if ( vis == TV_GAME && stickActive ) {
@@ -1116,10 +1170,13 @@ index 0000000..a38ceed
 +	in_touchScale = Cvar_Get( "in_touchScale", "1.0", CVAR_ARCHIVE );
 +	in_touchStickSize = Cvar_Get( "in_touchStickSize", "0.13", CVAR_ARCHIVE );
 +	in_touchInvertY = Cvar_Get( "in_touchInvertY", "0", CVAR_ARCHIVE );
++	// "" = automatic, "ru" or "en"
++	in_touchLang = Cvar_Get( "in_touchLang", "", CVAR_ARCHIVE );
 +
 +	Com_Memset( fingers, 0, sizeof( fingers ) );
 +	stickActive = qfalse;
 +	touchFont = NULL;
++	touchRussian = -1;
 +}
 +
 +/*
