@@ -475,7 +475,7 @@ index 74761af..2e4e5a3 100644
  	IN_DeactivateMouse( Cvar_VariableIntegerValue( "r_fullscreen" ) != 0 );
 diff --git a/code/sdl/sdl_touch.c b/code/sdl/sdl_touch.c
 new file mode 100644
-index 0000000..c37535c
+index 0000000..8b3c67b
 --- /dev/null
 +++ b/code/sdl/sdl_touch.c
 @@ -0,0 +1,711 @@
@@ -556,7 +556,7 @@ index 0000000..c37535c
 +	{ "WPN-", "<\xCE\xD0\xD3\xC6",   TB_ONESHOT,   "weapprev",         0,          0.82f, 0.12f, 0.055f, TV_GAME,        qfalse },
 +	{ "WPN+", "\xCE\xD0\xD3\xC6>",   TB_ONESHOT,   "weapnext",         0,          0.93f, 0.12f, 0.055f, TV_GAME,        qfalse },
 +	{ "MENU", "\xCC\xC5\xCD\xDE",   TB_KEY,       NULL,               K_ESCAPE,   0.10f, 0.09f, 0.05f, TV_GAME,         qfalse },
-+	{ "SCORE", "\xC7\xC0\xC4\xC0\xD7\xC8",  TB_COMMAND,   "scores",           0,          0.18f, 0.09f, 0.05f, TV_GAME,         qfalse },
++	{ "SCORE", "\xC7\xC0\xC4\xC0\xD7\xC8",  TB_TOGGLE,    "scores",           0,          0.18f, 0.09f, 0.05f, TV_GAME,         qfalse },
 +	{ "KBD", "\xCA\xCB\xC0\xC2.",    TB_KEYBOARD,  NULL,               0,          0.26f, 0.09f, 0.05f, TV_GAME|TV_MENU, qfalse },
 +	{ "~", "\xCA\xCE\xCD\xD1.",      TB_KEY,       NULL,               K_CONSOLE,  0.33f, 0.09f, 0.04f, TV_GAME,         qfalse },
 +};
