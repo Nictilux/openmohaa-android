@@ -3,7 +3,7 @@
 set -euo pipefail
 
 HERE="$(cd "$(dirname "$0")" && pwd)"
-DEPS="${DEPS_DIR:-$HERE/deps}"
+DEPS="${DEPS_DIR:-$HOME/openmohaa-android-deps}"
 mkdir -p "$DEPS"
 
 fetch() { # name url ref

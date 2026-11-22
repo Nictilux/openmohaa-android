@@ -73,7 +73,7 @@ cd android && gradle assembleDebug
   - `code/sdl/sdl_glimp.c`: поддержка gl4es;
   - `cmake/platforms/android.cmake`: настройки сборки под Android.
 - `android/`: проект Android-приложения (лаунчер, импорт файлов, SDL2 activity) и
-  скрипты сборки. OpenMoHAA, SDL2, OpenAL Soft и gl4es скачиваются при сборке
+  скрипты сборки. OpenMoHAA, SDL2, OpenAL Soft и gl4es скачиваются при сборке в `~/openmohaa-android-deps`
   (`android/fetch_deps.sh`).
 - `android/debug.keystore`: публичный отладочный ключ подписи. Он нужен, чтобы
   новые сборки устанавливались поверх старых и не удаляли импортированные файлы.

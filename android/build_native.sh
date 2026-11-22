@@ -19,7 +19,7 @@ if [ -z "$NDK" ] || [ ! -f "$NDK/build/cmake/android.toolchain.cmake" ]; then
     exit 1
 fi
 
-DEPS="${DEPS_DIR:-$HERE/deps}"
+DEPS="${DEPS_DIR:-$HOME/openmohaa-android-deps}"
 OUT="$HERE/build/$ABI"
 PREFIX="$OUT/prefix"
 JNILIBS="$HERE/app/src/main/jniLibs/$ABI"
@@ -72,7 +72,8 @@ cmake -S "$DEPS/openmohaa" -B "$OUT/openmohaa" "${COMMON[@]}" \
     -DGL4ES_INCLUDE_DIR="$DEPS/gl4es/include" \
     -DGL4ES_LIBRARY="$GL4ES_LIB" \
     -DBUILD_TESTING=OFF
-cmake --build "$OUT/openmohaa" -j "$JOBS"
+# -k 0: keep going after errors, so that all of them show up in the log
+cmake --build "$OUT/openmohaa" -j "$JOBS" -- -k 0
 
 echo "=== Collecting libraries into $JNILIBS"
 rm -rf "$JNILIBS"
